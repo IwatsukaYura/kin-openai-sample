@@ -33,6 +33,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
     post:
       operationId: createUser
       summary: ユーザー作成
@@ -52,11 +56,17 @@ paths:
               schema:
                 $ref: "#/components/schemas/User"
         "400":
-          description: Bad Request
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: 同じメールアドレスのユーザーが既に存在する
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
   /users/{id}:
     get:
       operationId: getUser
@@ -76,13 +86,36 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "404":
           description: Not Found
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 components:
+  responses:
+    BadRequest:
+      description: リクエストが OpenAPI 定義に違反している
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: 認証に失敗した
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalServerError:
+      description: サーバー内部エラー
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
   securitySchemes:
     ApiKeyAuth:
       type: apiKey
@@ -143,13 +176,3 @@ components:
       properties:
         message:
           type: string
-        errors:
-          type: array
-          items:
-            type: object
-            required: [reason]
-            properties:
-              field:
-                type: string
-              reason:
-                type: string

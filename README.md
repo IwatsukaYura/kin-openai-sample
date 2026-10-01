@@ -1,98 +1,76 @@
-# kin-openapi validation sample
+# kin-openapi validation sample (Gin + oapi-codegen strict-server)
 
-OpenAPI 定義から [oapi-codegen](https://github.com/oapi-codegen/oapi-codegen) で生成した Go の API サーバーに対して、
-[kin-openapi](https://github.com/getkin/kin-openapi) でリクエスト / レスポンスをどうバリデーションできるかを確認するためのサンプルです。
+OpenAPI 定義から [oapi-codegen](https://github.com/oapi-codegen/oapi-codegen) で Gin の strict-server を生成し、
+リクエストのバリデーションを oapi-codegen 公式の [gin-middleware](https://github.com/oapi-codegen/gin-middleware)
+(内部で [kin-openapi](https://github.com/getkin/kin-openapi) を使用) に任せる構成のサンプルです。
 
 ## 構成
 
 ```
 api/
-  openapi.yaml          # OpenAPI 定義 (ここが唯一の正)
-  oapi-codegen.yaml     # oapi-codegen の設定 (std-http-server + models + embedded-spec)
+  openapi.yaml          # OpenAPI 定義 (唯一の正)
+  oapi-codegen.yaml     # gin-server + strict-server + models + embedded-spec
   generate.go           # go:generate
   api.gen.go            # 生成コード (手で編集しない)
 internal/
-  validator/            # kin-openapi を直接使ったバリデーションミドルウェア
-  handler/              # api.ServerInterface の実装 (インメモリ)
-cmd/server/             # エントリーポイント + 結合テスト
+  server/               # Gin エンジンの組み立て (バリデーター・エラーハンドリング・認証)
+  handler/              # api.StrictServerInterface の実装 (業務ルールのみ)
+  store/                # 永続化 (サンプルなのでインメモリ)
+cmd/server/             # エントリーポイント (環境変数・タイムアウト・graceful shutdown)
 ```
 
 ## 使い方
 
 ```sh
-go generate ./...         # openapi.yaml から api/api.gen.go を再生成
-go test ./...             # バリデーションの挙動をテストで確認
-go run ./cmd/server       # :8080 で起動 (-validate-response=false でレスポンス検証オフ)
+go generate ./...                          # openapi.yaml から api/api.gen.go を再生成
+go test ./...                              # バリデーションの挙動をテストで確認
+API_KEY=secret GIN_MODE=release go run ./cmd/server   # PORT (デフォルト 8080)
 ```
 
 ```sh
-# 正常系
 curl -X POST localhost:8080/users -H 'X-API-Key: secret' -H 'Content-Type: application/json' \
   -d '{"name":"taro","email":"taro@example.com","role":"admin","tags":["go"]}'
+# => 201
 
-# 異常系 (MultiError: true なので全部のエラーがまとめて返る)
 curl -X POST localhost:8080/users -H 'X-API-Key: secret' -H 'Content-Type: application/json' \
-  -d '{"name":"","email":"bad","role":"guest","age":-1,"extra":1}'
-# => 400
-# {"message":"request validation failed","errors":[
-#   {"field":"body.age","reason":"number must be at least 0"},
-#   {"field":"body.email","reason":"string doesn't match the format \"email\" ..."},
-#   {"field":"body","reason":"property \"extra\" is unsupported"},
-#   {"field":"body.name","reason":"minimum string length is 1"},
-#   {"field":"body.role","reason":"value is not one of the allowed values [\"admin\",\"member\"]"}]}
+  -d '{"name":"","email":"bad","role":"guest","age":-1}'
+# => 400 {"message":"request body has an error: doesn't match schema #/components/schemas/NewUser:
+#          Error at \"/age\": number must be at least 0 | Error at \"/email\": ... | ..."}
 
 curl 'localhost:8080/users?limit=0&role=guest'
-# => 400 query.limit / query.role のエラー
+# => 400 {"message":"parameter \"limit\" in query has an error: number must be at least 1 | parameter \"role\" ..."}
 ```
 
-## バリデーションの流れ
+## 責務の分担
 
-`internal/validator/validator.go` で、kin-openapi の API を順に呼んでいます。
+| 層 | 担当 | 例 |
+| --- | --- | --- |
+| `gin-middleware` (kin-openapi) | OpenAPI 定義で表現できる入力チェック | 型、必須、min/max、enum、pattern、format、additionalProperties、security |
+| strict-server (生成コード) | 型付きのリクエスト / レスポンスへの変換 | `CreateUserRequestObject`、`CreateUser201JSONResponse` |
+| `handler` | 定義では表現できない業務ルール | メールアドレス重複 → 409 |
+| テスト | レスポンスが定義どおりか | `openapi3filter.ValidateResponse` で全レスポンスを検証 |
 
-1. `api.GetSpec()` — oapi-codegen が埋め込んだ定義を `*openapi3.T` として取得
-2. `gorillamux.NewRouter(spec)` → `router.FindRoute(r)` — リクエストに対応するオペレーションを特定 (未定義なら 404 / 405)
-3. `openapi3filter.ValidateRequest` — path / query / header パラメーター、リクエストボディ、security を検証
-4. (任意) ハンドラーのレスポンスをバッファしておき `openapi3filter.ValidateResponse` で検証
+## 本番運用を意識したポイント
 
-返ってくるエラーは以下のような型の入れ子になっているので、`toErrorResponse` で剥がして `field` / `reason` の配列に変換しています。
+- **バリデーターはルーターグループに付ける。** 生成コードの `GinServerOptions.Middlewares` はパスパラメーターのバインド *後* に実行されるため、
+  `/users/abc` のような型違いが kin-openapi に届かない。`r.Group("", validator)` に `RegisterHandlers` することで先にチェックする。
+  `/healthz` のような定義外のエンドポイントはグループの外に置く。
+- **`MultiError: true`** で全てのエラーをまとめて返す。`MultiErrorHandler` を指定しないと `multiple errors encountered: ` が前に付く。
+- **`openapi3.SchemaErrorDetailsDisabled = true`** にして、エラーメッセージにスキーマ定義や入力値全体がダンプされないようにする。
+- **`format: email` はデフォルトでは検証されない。** `openapi3.DefineStringFormatValidator` で kin-openapi 同梱の `FormatOfStringForEmail` を登録する。
+- **security を定義したら `AuthenticationFunc` が必須。** 未設定だとそのオペレーションは常に失敗する。
+  gin-middleware の `ErrorHandler` にはメッセージ文字列とステータス (400/404) しか渡らないため、
+  `ginmiddleware.GetGinContext(ctx)` で認証失敗を gin.Context に記録し、`ErrorHandler` で 401 に変えている。
+- **`spec.Servers = nil`**。servers が書かれていると Host ヘッダーまで照合され `no matching operation was found` になる。
+- 起動時に `spec.Validate` で定義そのものの誤りを検出する。
+- strict-server の `HandlerErrorFunc` / `ResponseErrorHandlerFunc` では内部エラーをログに出し、クライアントには詳細を返さない。
+- `http.Server` のタイムアウト設定と SIGTERM での graceful shutdown。
+- **レスポンス検証はテストでだけ行う。** 本番でやるとボディのバッファリングと検証のコストがかかるため。
+  `IncludeResponseStatus: true` で、定義していないステータスコードを返した場合も検出する。
 
-| 型 | 意味 |
-| --- | --- |
-| `openapi3.MultiError` | `Options.MultiError: true` のときの複数エラー |
-| `*openapi3filter.RequestError` | どのパラメーター / ボディでのエラーか (`Parameter`, `RequestBody`) |
-| `*openapi3filter.SecurityRequirementsError` | 認証エラー (401 にしている) |
-| `*openapi3filter.ResponseError` | レスポンスのエラー |
-| `*openapi3.SchemaError` | スキーマ違反の詳細。`JSONPointer()` で `tags/0` のような位置が取れる |
+## gin-middleware の制約
 
-## 検証してわかったこと・ハマりどころ
-
-- **`format: email` はデフォルトでは検証されない。** kin-openapi が組み込みで検証するのは `date` / `date-time` / `byte` / `int32` / `int64` だけ。
-  `openapi3.DefineStringFormatValidator("email", ...)` で自分で登録する必要がある (`validator.go` の `init`)。
-- **security を定義したら `AuthenticationFunc` が必須。** 未設定だとそのオペレーションへのリクエストは全部失敗する。
-  API キーの照合などはこの関数の中で自分で書く。
-- **`MultiError: true` にしないと最初の 1 件で止まる。** フォームのように全エラーを返したい場合は有効にする。
-- **`errors.As` で `MultiError` を判定すると順序がおかしくなる。** `openapi3.MultiError` は `As` メソッドを持っていて、
-  `RequestError` の中の `MultiError` に先にマッチしてしまい、どのパラメーターのエラーか (`Parameter`) が取れなくなる。
-  外側から type switch で剥がすのが確実。
-- **`servers` を書くと Host ヘッダーまで照合される。** ローカルや別ホストから叩くと `no matching operation was found` になるので、
-  ルーター作成前に `spec.Servers = nil` にしている。
-- **ミドルウェアをどこに挟むか。** oapi-codegen の `StdHTTPServerOptions.Middlewares` は生成コードがパスパラメーターをバインドした
-  *後* に実行されるため、`/users/abc` のような型違いは kin-openapi に届く前に生成コード側のエラーになる。
-  このサンプルでは `v.Handler(api.Handler(...))` と mux 全体をラップして、kin-openapi を最初に通している。
-- **`additionalProperties: false`** の違反は `property "extra" is unsupported` になり、`JSONPointer` はオブジェクト自体 (`body`) を指す。
-- **レスポンス検証** では `IncludeResponseStatus: true` にすると、定義にないステータスコードを返したときに `status is not supported` で検出できる。
-  ボディ全体をバッファする必要があるので、本番では無効化 (開発・テスト時のみ有効) にする使い方が現実的。
-
-## 補足: nethttp-middleware を使う場合
-
-同じことを oapi-codegen 公式の [`github.com/oapi-codegen/nethttp-middleware`](https://github.com/oapi-codegen/nethttp-middleware) でも実現できます
-(内部で同じく `openapi3filter.ValidateRequest` を呼んでいる)。
-
-```go
-mw := nethttpmiddleware.OapiRequestValidatorWithOptions(spec, &nethttpmiddleware.Options{
-    Options: openapi3filter.Options{MultiError: true, AuthenticationFunc: authenticate},
-})
-http.ListenAndServe(":8080", mw(api.Handler(handler.New())))
-```
-
-レスポンス検証やエラーレスポンスの形を細かく制御したい場合は、このサンプルのように kin-openapi を直接使う方が見通しが良いです。
+- エラーは文字列でしか `ErrorHandler` に渡らないため、`{"field": ..., "reason": ...}` のような構造化したエラーは返せない。
+  構造化が必要なら、`openapi3filter.ValidateRequest` を直接呼ぶミドルウェアを自前で書くことになる。
+- 定義にないメソッドは 405 ではなく 400 (`method not allowed`) になる。
+  このサンプルでは Gin の `HandleMethodNotAllowed` を有効にしているので、Gin のルーティングで先に 405 が返る。
