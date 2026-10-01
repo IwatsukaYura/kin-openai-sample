@@ -1,0 +1,155 @@
+openapi: 3.0.3
+info:
+  title: kin-openapi validation sample
+  version: 1.0.0
+  description: |
+    oapi-codegen で生成したサーバーに対して、kin-openapi でリクエスト/レスポンスを
+    バリデーションする挙動を確認するためのシンプルな API。
+paths:
+  /users:
+    get:
+      operationId: listUsers
+      summary: ユーザー一覧
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: role
+          in: query
+          required: false
+          schema:
+            $ref: "#/components/schemas/Role"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+    post:
+      operationId: createUser
+      summary: ユーザー作成
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewUser"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+  /users/{id}:
+    get:
+      operationId: getUser
+      summary: ユーザー取得
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+  schemas:
+    Role:
+      type: string
+      enum: [admin, member]
+    NewUser:
+      type: object
+      additionalProperties: false
+      required: [name, email, role]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 20
+        email:
+          type: string
+          format: email
+        age:
+          type: integer
+          minimum: 0
+          maximum: 150
+        role:
+          $ref: "#/components/schemas/Role"
+        tags:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          items:
+            type: string
+            pattern: "^[a-z]+$"
+    User:
+      type: object
+      required: [id, name, email, role]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        email:
+          type: string
+          format: email
+        age:
+          type: integer
+        role:
+          $ref: "#/components/schemas/Role"
+        tags:
+          type: array
+          items:
+            type: string
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            required: [reason]
+            properties:
+              field:
+                type: string
+              reason:
+                type: string
